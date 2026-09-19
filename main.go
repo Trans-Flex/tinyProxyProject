@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/sync/singleflight"
 )
 
 func main() {
@@ -25,6 +27,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	//引入singleflight以解决缓存击穿问题
+	sf := &singleflight.Group{}
 
 	for {
 		conn, err := listener.Accept()
@@ -67,6 +72,46 @@ func main() {
 					headBuilder.WriteString(line)
 				}
 			}
+
+			if info.method == "CONNECT" {
+				//隧道分支
+
+				//与服务器连接
+				var hostport string
+				idx := strings.IndexByte(info.host, ':')
+				if idx != -1 {
+					hostport = "[" + info.host + "]"
+				} else {
+					hostport = info.host
+				}
+				hostport += ":" + strconv.Itoa(info.port)
+				serverConn, err := net.Dial("tcp", hostport)
+				if err != nil {
+					io.WriteString(c, buildErrorResponse(502))
+					return
+				}
+				defer serverConn.Close()
+
+				io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+				var waitgroup sync.WaitGroup
+				waitgroup.Add(2)
+				go func() {
+					defer waitgroup.Done()
+					io.Copy(serverConn, clientReader) // 客户端 → 服务器
+					serverConn.Close()
+					c.Close()
+				}()
+				go func() {
+					defer waitgroup.Done()
+					io.Copy(c, serverConn) // 服务器 → 客户端
+					serverConn.Close()
+					c.Close()
+				}()
+				waitgroup.Wait()
+				return
+			}
+
 			//解析头字段并存储
 			headerCollection, err := parseHeaders(headBuilder.String())
 			if err != nil {
@@ -96,66 +141,73 @@ func main() {
 				keyBuilder.WriteString("?" + info.query)
 			}
 
-			cacheResp, ok := cache.get(keyBuilder.String())
+			key := keyBuilder.String()
+			cacheResp, ok := cache.get(key)
 			if ok {
 				c.Write(cacheResp)
-				fmt.Println("cache hit:", keyBuilder.String())
+				fmt.Println("cache hit:", key)
 				return
 			}
-			fmt.Println("cache miss:", keyBuilder.String())
+			fmt.Println("cache miss:", key)
 
-			//与服务器连接
-			var hostport string
-			idx := strings.IndexByte(info.host, ':')
-			if idx != -1 {
-				hostport = "[" + info.host + "]"
-			} else {
-				hostport = info.host
-			}
-			hostport += ":" + strconv.Itoa(info.port)
-			serverConn, err := net.Dial("tcp", hostport)
-			if err != nil {
-				response := buildErrorResponse(502)
-				io.WriteString(c, response)
-				return
-			}
-			defer serverConn.Close()
-			//向服务器发送请求
-			_, err = io.WriteString(serverConn, request)
-			if err != nil {
-				response := buildErrorResponse(502)
-				io.WriteString(c, response)
-				return
-			}
-			//回响
-			serverReader := bufio.NewReader(serverConn)
-			resp, err := parseResponse(serverReader, info.method)
+			result, err, _ := sf.Do(key, func() (any, error) {
+				//再次尝试
+				cacheResp, ok := cache.get(key)
+				if ok {
+					fmt.Println("cache hit:", key)
+					return cacheResp, nil
+				}
+
+				//与服务器连接
+				var hostport string
+				idx := strings.IndexByte(info.host, ':')
+				if idx != -1 {
+					hostport = "[" + info.host + "]"
+				} else {
+					hostport = info.host
+				}
+				hostport += ":" + strconv.Itoa(info.port)
+				fmt.Println("dial:", hostport)
+				serverConn, err := net.Dial("tcp", hostport)
+				if err != nil {
+					return nil, fmt.Errorf("连接 %s 失败: %w", hostport, err)
+				}
+				defer serverConn.Close()
+				//向服务器发送请求
+				_, err = io.WriteString(serverConn, request)
+				if err != nil {
+					return nil, fmt.Errorf("向服务器发送请求失败: %w", err)
+				}
+				//回响
+				serverReader := bufio.NewReader(serverConn)
+				resp, err := parseResponse(serverReader, info.method)
+				if err != nil {
+					return nil, fmt.Errorf("解析响应失败: %w", err)
+				}
+
+				ableToCache := cache.ableToCache(&resp)
+
+				var bodyBuf bytes.Buffer
+				err = copyBody(serverReader, &bodyBuf, resp)
+				if err != nil {
+					return nil, fmt.Errorf("读取body发生错误: %w", err)
+				}
+
+				combined := make([]byte, 0, len(resp.rawHeader)+bodyBuf.Len())
+				combined = append(combined, resp.rawHeader...)
+				combined = append(combined, bodyBuf.Bytes()...)
+				if ableToCache {
+					_ = cache.put(key, combined)
+					fmt.Println("cache put:", key, len(combined))
+				}
+				return combined, nil
+			})
+
 			if err != nil {
 				io.WriteString(c, buildErrorResponse(502))
 				return
 			}
-			c.Write(resp.rawHeader)
-
-			ableToCache := cache.ableToCache(&resp)
-
-			var bodyBuf bytes.Buffer
-			var writer io.Writer = c
-			if ableToCache {
-				writer = io.MultiWriter(c, &bodyBuf)
-			}
-			err = copyBody(serverReader, writer, resp)
-			if err != nil {
-				fmt.Printf("读取body发生错误: %v\n", err)
-				return
-			}
-
-			if ableToCache {
-				combined := make([]byte, 0, len(resp.rawHeader)+bodyBuf.Len())
-				combined = append(combined, resp.rawHeader...)
-				combined = append(combined, bodyBuf.Bytes()...)
-				_ = cache.put(keyBuilder.String(), combined)
-				fmt.Println("cache put:", keyBuilder.String(), len(combined))
-			}
+			c.Write(result.([]byte))
 
 		}(conn)
 	}

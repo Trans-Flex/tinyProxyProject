@@ -150,7 +150,7 @@ func decideFraming(method string, header HeaderCollection, statusCode int) (Body
 			return FramingUntilEOF, -1, fmt.Errorf("不合规的Content-Length字段: %q", contentLengthStr)
 		}
 		if contentLength < 0 {
-			return FramingUntilEOF, -1, fmt.Errorf("不合规的Content-Length字段: %q", contentLength)
+			return FramingUntilEOF, -1, fmt.Errorf("不合规的Content-Length字段: %d", contentLength)
 		}
 		return FramingContentLength, contentLength, nil
 	}

@@ -45,18 +45,103 @@ func TestParseRequestLine(t *testing.T) {
 			requestLine: "GET http://example.com/a#frag HTTP/1.1",
 			wantInfo:    Info{method: "GET", scheme: "http", host: "example.com", port: 80, path: "/a", version: "HTTP/1.1"},
 		},
+		{
+			name:        "CONNECT 标准",
+			requestLine: "CONNECT example.com:443 HTTP/1.1",
+			wantInfo:    Info{method: "CONNECT", scheme: "https", host: "example.com", port: 443, path: "/", version: "HTTP/1.1"},
+		},
+		{
+			name:        "CONNECT IPv6",
+			requestLine: "CONNECT [::1]:443 HTTP/1.1",
+			wantInfo:    Info{method: "CONNECT", scheme: "https", host: "::1", port: 443, path: "/", version: "HTTP/1.1"},
+		},
+		{
+			name:        "CONNECT 非默认端口",
+			requestLine: "CONNECT example.com:8443 HTTP/1.1",
+			wantInfo:    Info{method: "CONNECT", scheme: "https", host: "example.com", port: 8443, path: "/", version: "HTTP/1.1"},
+		},
 
 		// 非法
-		{"空的 requestLine", "", Info{}, true},
-		{"段数不足", "GET http://example.com/path", Info{}, true},
-		{"段数过多", "GET http://example.com/path HTTP/1.1 extra", Info{}, true},
-		{"缺少 scheme", "GET example.com/path HTTP/1.1", Info{}, true},
-		{"无效的 scheme", "GET nttq://example.com/path HTTP/1.1", Info{}, true},
-		{"authority 为空", "GET http:///path HTTP/1.1", Info{}, true},
-		{"端口非数字", "GET http://example.com:abc/ HTTP/1.1", Info{}, true},
-		{"host 为空", "GET http://:8080/ HTTP/1.1", Info{}, true},
-		{"IPv6 缺右括号", "GET http://[::1/a HTTP/1.1", Info{}, true},
-		{"IPv6 后接非法字符", "GET http://[::1]abc/ HTTP/1.1", Info{}, true},
+		{
+			name:        "空的 requestLine",
+			requestLine: "",
+			wantErr:     true,
+		},
+		{
+			name:        "段数不足",
+			requestLine: "GET http://example.com/path",
+			wantErr:     true,
+		},
+		{
+			name:        "段数过多",
+			requestLine: "GET http://example.com/path HTTP/1.1 extra",
+			wantErr:     true,
+		},
+		{
+			name:        "缺少 scheme",
+			requestLine: "GET example.com/path HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "无效的 scheme",
+			requestLine: "GET nttq://example.com/path HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "authority 为空",
+			requestLine: "GET http:///path HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "端口非数字",
+			requestLine: "GET http://example.com:abc/ HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "host 为空",
+			requestLine: "GET http://:8080/ HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "IPv6 缺右括号",
+			requestLine: "GET http://[::1/a HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "IPv6 后接非法字符",
+			requestLine: "GET http://[::1]abc/ HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT 缺少端口",
+			requestLine: "CONNECT example.com HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT IPv6 缺少端口",
+			requestLine: "CONNECT [::1] HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT 带 path",
+			requestLine: "CONNECT example.com:443/path HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT 带 query",
+			requestLine: "CONNECT example.com:443?x=1 HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT 带 fragment",
+			requestLine: "CONNECT example.com:443#frag HTTP/1.1",
+			wantErr:     true,
+		},
+		{
+			name:        "CONNECT 端口非数字",
+			requestLine: "CONNECT example.com:abc HTTP/1.1",
+			wantErr:     true,
+		},
 	}
 
 	for _, tt := range tests {

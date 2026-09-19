@@ -16,6 +16,7 @@ type Info struct {
 	version string
 }
 
+// 尝试支持CONNECT
 func parseRequestLine(requestLine string) (Info, error) {
 	if requestLine == "" {
 		return Info{}, fmt.Errorf("请求行为空！")
@@ -27,17 +28,23 @@ func parseRequestLine(requestLine string) (Info, error) {
 	if len(parts) != 3 {
 		return Info{}, fmt.Errorf("无效的请求行: %q", requestLine)
 	}
-	//缺少method解析
-	info.method = strings.Clone(parts[0])
-	info.version = strings.Clone(parts[2])
 
 	var restLine string
-	info.scheme, restLine, ok = strings.Cut(parts[1], "://")
-	if !ok {
-		return Info{}, fmt.Errorf("无效的请求行: %q", requestLine)
-	}
-	if info.scheme != "http" && info.scheme != "https" {
-		return Info{}, fmt.Errorf("无效的scheme: %q", info.scheme)
+	info.method = strings.Clone(parts[0])
+	info.version = strings.Clone(parts[2])
+	if info.method == "CONNECT" {
+		//隧道分支
+		info.scheme = "https"
+		restLine = parts[1]
+	} else {
+		//普通http分支
+		info.scheme, restLine, ok = strings.Cut(parts[1], "://")
+		if !ok {
+			return Info{}, fmt.Errorf("无效的请求行: %q", requestLine)
+		}
+		if info.scheme != "http" && info.scheme != "https" {
+			return Info{}, fmt.Errorf("无效的scheme: %q", info.scheme)
+		}
 	}
 
 	var authority string
@@ -46,6 +53,9 @@ func parseRequestLine(requestLine string) (Info, error) {
 		authority = restLine
 		restLine = ""
 	} else {
+		if info.method == "CONNECT" {
+			return Info{}, fmt.Errorf("使用CONNECT不得有path,query")
+		}
 		authority = strings.Clone(restLine[0:idx])
 		restLine = strings.Clone(restLine[idx:])
 	}
@@ -108,6 +118,9 @@ func parseRequestLine(requestLine string) (Info, error) {
 		if info.scheme == "http" {
 			info.port = 80
 		} else {
+			if info.method == "CONNECT" {
+				return Info{}, fmt.Errorf("缺少port")
+			}
 			info.port = 443
 		}
 	}
