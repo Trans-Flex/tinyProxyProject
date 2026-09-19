@@ -167,7 +167,6 @@ func main() {
 					hostport = info.host
 				}
 				hostport += ":" + strconv.Itoa(info.port)
-				fmt.Println("dial:", hostport)
 				serverConn, err := net.Dial("tcp", hostport)
 				if err != nil {
 					return nil, fmt.Errorf("连接 %s 失败: %w", hostport, err)
