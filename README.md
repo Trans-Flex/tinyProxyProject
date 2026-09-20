@@ -80,15 +80,12 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 50 并发冷启动下，singleflight 将上游回源次数从 50 降到 1，QPS 提升 4.24 倍，P99 从 12.32s 降到 2.90s。代价是中位数延迟从 862ms 变为 2.90s，因为所有等待者共享同一次回源的延迟。这是“保护上游、降低尾部延迟”和“中位数延迟”之间的取舍。
 
 ## 已知限制
-- 仅支持 GET, POST 请求
-- method 白名单未实现, 非 GET/POST/CONNECT 会掉进 GET 分支
 - 只缓存 Content-Length 响应，chunked 和 until-EOF 不缓存
 - 不支持 keep-alive，每个请求使用 Connection: close
 - 未对 method 做合法性校验，依赖服务器拒绝
 - CONNECT 隧道不设空闲超时
 
 ## 未来计划
-- POST 请求体转发
 - chunked 响应缓存
 - keep-alive 连接复用
 
