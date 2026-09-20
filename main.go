@@ -117,12 +117,23 @@ func main() {
 				io.WriteString(c, response)
 				return
 			}
-			//POST分支
-			if info.method == "POST" {
-				contentLengthStr := headerCollection.first("Content-Length")
-				if contentLengthStr == "" {
+
+			if info.method != "GET" {
+				//非 GET 分支
+				if headerCollection.has("Transfer-Encoding") {
 					io.WriteString(c, buildErrorResponse(501))
 					return
+				}
+				contentLengthStr := headerCollection.first("Content-Length")
+				if contentLengthStr == "" {
+					//没有body
+					_, err := forward(info, request, nil, FramingNone, 0, c)
+					if err != nil {
+						log.Printf("转发失败: %v", err)
+						return
+					}
+					return
+
 				}
 				contentLength, err := strconv.Atoi(contentLengthStr)
 				if err != nil || contentLength < 0 {
@@ -131,8 +142,7 @@ func main() {
 				}
 				_, err = forward(info, request, clientReader, FramingContentLength, contentLength, c)
 				if err != nil {
-					log.Printf("发生错误: %v", err)
-					io.WriteString(c, buildErrorResponse(502))
+					log.Printf("转发失败: %v", err)
 					return
 				}
 				return
