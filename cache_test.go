@@ -140,3 +140,56 @@ func TestCache(t *testing.T) {
 		}
 	})
 }
+
+func TestCacheKey(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+		want string
+	}{
+		{
+			name: "标准 http",
+			info: Info{scheme: "http", host: "example.com", port: 80, path: "/path"},
+			want: "http://example.com:80/path",
+		},
+		{
+			name: "带 query",
+			info: Info{scheme: "http", host: "example.com", port: 80, path: "/a", query: "b=1&c=2"},
+			want: "http://example.com:80/a?b=1&c=2",
+		},
+		{
+			name: "空 query 不加问号",
+			info: Info{scheme: "http", host: "example.com", port: 80, path: "/a", query: ""},
+			want: "http://example.com:80/a",
+		},
+		{
+			name: "https 默认端口",
+			info: Info{scheme: "https", host: "example.com", port: 443, path: "/"},
+			want: "https://example.com:443/",
+		},
+		{
+			name: "非默认端口",
+			info: Info{scheme: "http", host: "example.com", port: 8080, path: "/a"},
+			want: "http://example.com:8080/a",
+		},
+		{
+			name: "IPv6 加方括号",
+			info: Info{scheme: "http", host: "::1", port: 8080, path: "/a"},
+			want: "http://[::1]:8080/a",
+		},
+		{
+			name: "默认端口也带进 key",
+			info: Info{scheme: "http", host: "example.com", port: 80, path: "/"},
+			want: "http://example.com:80/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cacheKey(tt.info)
+			if got != tt.want {
+				t.Errorf("cacheKey(%+v) = %q, 期望 %q", tt.info, got, tt.want)
+			}
+		})
+	}
+}

@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -38,8 +38,7 @@ func main() {
 				// 监听器被关，退出
 				break
 			}
-			// 其他错误，记录日志，继续
-			fmt.Println("accept 错误:", err)
+			log.Printf("accept 错误: %v", err)
 			continue
 		}
 
@@ -77,15 +76,7 @@ func main() {
 				//隧道分支
 
 				//与服务器连接
-				var hostport string
-				idx := strings.IndexByte(info.host, ':')
-				if idx != -1 {
-					hostport = "[" + info.host + "]"
-				} else {
-					hostport = info.host
-				}
-				hostport += ":" + strconv.Itoa(info.port)
-				serverConn, err := net.Dial("tcp", hostport)
+				serverConn, err := dialUpstream(info)
 				if err != nil {
 					io.WriteString(c, buildErrorResponse(502))
 					return
@@ -126,83 +117,60 @@ func main() {
 				io.WriteString(c, response)
 				return
 			}
+			//POST分支
+			if info.method == "POST" {
+				contentLengthStr := headerCollection.first("Content-Length")
+				if contentLengthStr == "" {
+					io.WriteString(c, buildErrorResponse(501))
+					return
+				}
+				contentLength, err := strconv.Atoi(contentLengthStr)
+				if err != nil || contentLength < 0 {
+					io.WriteString(c, buildErrorResponse(400))
+					return
+				}
+				_, err = forward(info, request, clientReader, FramingContentLength, contentLength, c)
+				if err != nil {
+					log.Printf("发生错误: %v", err)
+					io.WriteString(c, buildErrorResponse(502))
+					return
+				}
+				return
+			}
+			//GET分支
+
 			//构建key并查找LRU缓存
 			//因为默认端口也已经作为数据存入info，所以不需要额外判定以提高命中率
-			var keyBuilder strings.Builder
-			keyBuilder.WriteString(info.scheme + "://")
-			if strings.Contains(info.host, ":") {
-				keyBuilder.WriteString("[" + info.host + "]")
-			} else {
-				keyBuilder.WriteString(info.host)
-			}
-			keyBuilder.WriteString(":" + strconv.Itoa(info.port))
-			keyBuilder.WriteString(info.path)
-			if info.query != "" {
-				keyBuilder.WriteString("?" + info.query)
-			}
 
-			key := keyBuilder.String()
+			key := cacheKey(info)
 			cacheResp, ok := cache.get(key)
 			if ok {
 				c.Write(cacheResp)
-				fmt.Println("cache hit:", key)
 				return
 			}
-			fmt.Println("cache miss:", key)
 
 			result, err, _ := sf.Do(key, func() (any, error) {
 				//再次尝试
 				cacheResp, ok := cache.get(key)
 				if ok {
-					fmt.Println("cache hit:", key)
 					return cacheResp, nil
 				}
 
-				//与服务器连接
-				var hostport string
-				idx := strings.IndexByte(info.host, ':')
-				if idx != -1 {
-					hostport = "[" + info.host + "]"
-				} else {
-					hostport = info.host
-				}
-				hostport += ":" + strconv.Itoa(info.port)
-				serverConn, err := net.Dial("tcp", hostport)
-				if err != nil {
-					return nil, fmt.Errorf("连接 %s 失败: %w", hostport, err)
-				}
-				defer serverConn.Close()
-				//向服务器发送请求
-				_, err = io.WriteString(serverConn, request)
-				if err != nil {
-					return nil, fmt.Errorf("向服务器发送请求失败: %w", err)
-				}
-				//回响
-				serverReader := bufio.NewReader(serverConn)
-				resp, err := parseResponse(serverReader, info.method)
-				if err != nil {
-					return nil, fmt.Errorf("解析响应失败: %w", err)
-				}
-
-				ableToCache := cache.ableToCache(&resp)
-
 				var bodyBuf bytes.Buffer
-				err = copyBody(serverReader, &bodyBuf, resp)
+				resp, err := forward(info, request, nil, FramingNone, 0, &bodyBuf)
 				if err != nil {
-					return nil, fmt.Errorf("读取body发生错误: %w", err)
+					return nil, err
 				}
 
-				combined := make([]byte, 0, len(resp.rawHeader)+bodyBuf.Len())
-				combined = append(combined, resp.rawHeader...)
-				combined = append(combined, bodyBuf.Bytes()...)
-				if ableToCache {
-					_ = cache.put(key, combined)
-					fmt.Println("cache put:", key, len(combined))
+				data := bodyBuf.Bytes()
+				if cache.ableToCache(&resp) {
+					_ = cache.put(key, data)
 				}
-				return combined, nil
+				return data, nil
 			})
 
 			if err != nil {
+				log.Printf("发生错误: %v", err)
 				io.WriteString(c, buildErrorResponse(502))
 				return
 			}

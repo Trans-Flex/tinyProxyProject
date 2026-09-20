@@ -6,6 +6,7 @@
 
 - HTTP/1.1 GET 请求转发
 - HTTPS CONNECT 隧道，盲转发 TLS 密文，不解密
+- HTTP/1.1 POST 请求转发
 - 每连接一 goroutine 的并发模型
 - 请求行解析：method、scheme、host、port、path、query、version
 - IPv6 地址支持（`[::1]:8080`）
@@ -79,7 +80,8 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 50 并发冷启动下，singleflight 将上游回源次数从 50 降到 1，QPS 提升 4.24 倍，P99 从 12.32s 降到 2.90s。代价是中位数延迟从 862ms 变为 2.90s，因为所有等待者共享同一次回源的延迟。这是“保护上游、降低尾部延迟”和“中位数延迟”之间的取舍。
 
 ## 已知限制
-- 仅支持 GET 请求，不支持 POST 请求体转发
+- 仅支持 GET, POST 请求
+- method 白名单未实现, 非 GET/POST/CONNECT 会掉进 GET 分支
 - 只缓存 Content-Length 响应，chunked 和 until-EOF 不缓存
 - 不支持 keep-alive，每个请求使用 Connection: close
 - 未对 method 做合法性校验，依赖服务器拒绝
@@ -93,13 +95,15 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 ## 项目结构
 ```text
 .
-├── main.go        # 入口：监听、accept、goroutine
-├── request.go     # Info 结构体 + parseRequestLine
-├── header.go      # HeaderCollection + parseHeaders + checkName
+
+├── main.go        # 入口：监听、accept、goroutine、CONNECT 隧道、请求分发
+├── request.go     # Info 结构体 + parseRequestLine（含 CONNECT 解析）
+├── header.go      # HeaderField + HeaderCollection + parseHeaders + checkName
 ├── response.go    # Response + parseResponse + decideFraming
-├── body.go        # copyBody：按 framing 读并转发
+├── body.go        # copyBody：按 framing 读响应体并转发
 ├── build.go       # buildRequest + buildErrorResponse
-├── cache.go       # LRU Cache
+├── cache.go       # LRU Cache + cacheKey + ableToCache
+├── upstream.go    # hostport + dialUpstream + forward
 └── bench/
     └── main.go    # 压测工具
 ```

@@ -3,6 +3,7 @@ package main
 import (
 	"container/list"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -118,4 +119,22 @@ func (cache *Cache) ableToCache(resp *Response) bool {
 	}
 
 	return true
+}
+
+func cacheKey(info Info) string {
+	var keyBuilder strings.Builder
+	keyBuilder.WriteString(info.scheme + "://")
+	if strings.Contains(info.host, ":") {
+		keyBuilder.WriteString("[" + info.host + "]")
+	} else {
+		keyBuilder.WriteString(info.host)
+	}
+	keyBuilder.WriteString(":" + strconv.Itoa(info.port))
+	keyBuilder.WriteString(info.path)
+	if info.query != "" {
+		keyBuilder.WriteString("?" + info.query)
+	}
+
+	key := keyBuilder.String()
+	return key
 }
