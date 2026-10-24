@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -85,18 +86,21 @@ func main() {
 
 				io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
 
+				timeoutServerConn := &TimeoutConn{Conn: serverConn, timeout: 30 * time.Second}
+				timeoutClientConn := &TimeoutConn{Conn: c, timeout: 30 * time.Second}
+
 				var waitgroup sync.WaitGroup
 				waitgroup.Add(2)
 				go func() {
 					defer waitgroup.Done()
-					io.Copy(serverConn, clientReader) // 客户端 → 服务器
-					serverConn.Close()
+					io.Copy(timeoutServerConn, clientReader) // 客户端 → 服务器
+					timeoutServerConn.Close()
 					c.Close()
 				}()
 				go func() {
 					defer waitgroup.Done()
-					io.Copy(c, serverConn) // 服务器 → 客户端
-					serverConn.Close()
+					io.Copy(timeoutClientConn, serverConn) // 服务器 → 客户端
+					timeoutServerConn.Close()
 					c.Close()
 				}()
 				waitgroup.Wait()

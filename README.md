@@ -4,9 +4,9 @@
 
 ## 功能
 
-- HTTP/1.1 GET 请求转发
+- HTTP/1.1 GET 与 POST 请求转发
 - HTTPS CONNECT 隧道，盲转发 TLS 密文，不解密
-- HTTP/1.1 POST 请求转发
+- CONNECT 隧道空闲超时（基于双向心跳机制，防止恶意挂机耗尽系统 fd）
 - 每连接一 goroutine 的并发模型
 - 请求行解析：method、scheme、host、port、path、query、version
 - IPv6 地址支持（`[::1]:8080`）
@@ -16,6 +16,7 @@
 - singleflight 合并同 key 回源，解决缓存击穿
 - 标准错误响应：400 / 500 / 501 / 502
 - hop-by-hop 头处理：删除 Proxy-Connection，重写 Host，添加 Via 和 Connection: close
+- 完备的测试体系：80+ 单元测试用例，全量通过 `go test -race` 校验
 
 ## 架构
 ```text
@@ -44,7 +45,8 @@ CONNECT隧道流程:
 2. 读完头字段并丢弃
 3. 连目标服务器，失败返回 502
 4. 回 200 Connection Established
-5. 双向 io.Copy 透明转发，不解析任何内容
+5. 双向 ```io.Copy``` 透明转发，不解析任何内容
+6. 空闲超时控制：将 TCP 连接包装进自定义的 ```TimeoutConn```，无论读写只要有数据流动，就自动重置双向 Deadline。若静默超时，底层 ```Read/Write``` 抛出错误，自动断开连接释放资源。
 
 ## 快速开始
 
@@ -75,15 +77,23 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 | 场景 | 上游回源次数 | QPS | P50 | P99 | 总耗时 |
 |---|---|---|---|---|---|
 | 无 singleflight | 50 | 4.06 | 862ms | 12.32s | 12.32s |
-| 有 singleflight | 1 | 17.22 | 2.90ms | 2.90s | 2.90s |
+| 有 singleflight | 1 | 17.22 | 2.90s | 2.90s | 2.90s |
 
 50 并发冷启动下，singleflight 将上游回源次数从 50 降到 1，QPS 提升 4.24 倍，P99 从 12.32s 降到 2.90s。代价是中位数延迟从 862ms 变为 2.90s，因为所有等待者共享同一次回源的延迟。这是“保护上游、降低尾部延迟”和“中位数延迟”之间的取舍。
+
+## 技术要点
+
+- 流式转发：用 ```io.Copy``` 和 ```io.LimitReader```，可缓存时传 ```io.MultiWriter(conn, &buf)```，函数本身不用改。
+- 响应捕获：```parseResponse``` 保留原始头字节 ```rawHeader```，与 body 拼接后作为完整响应存入缓存。
+- 接口抽象：```copyBody``` 接收 ```io.Writer```（```ialUpstream + forward```），边读边写，大响应不占内存。
+- LRU 实现：```container/list``` 双向链表 + map，O(1) 查找和淘汰。
+- CONNECT 隧道：识别 CONNECT 后不再解析 HTTP，双向 ```io.Copy``` 透明转发；客户端方向复用 ```bufio.Reader``` 避免丢预读字节。
+- 心跳超时 (TimeoutConn)：通过组合（Embedding）原生 ```net.Conn```，在自定义的 ```Read/Write``` 方法中实时刷新 Deadline，实现优雅的空闲熔断。
 
 ## 已知限制
 - 只缓存 Content-Length 响应，chunked 和 until-EOF 不缓存
 - 不支持 keep-alive，每个请求使用 Connection: close
 - 未对 method 做合法性校验，依赖服务器拒绝
-- CONNECT 隧道不设空闲超时
 
 ## 未来计划
 - chunked 响应缓存
@@ -92,24 +102,16 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 ## 项目结构
 ```text
 .
-
-├── main.go        # 入口：监听、accept、goroutine、CONNECT 隧道、请求分发
-├── request.go     # Info 结构体 + parseRequestLine（含 CONNECT 解析）
-├── header.go      # HeaderField + HeaderCollection + parseHeaders + checkName
-├── response.go    # Response + parseResponse + decideFraming
-├── body.go        # copyBody：按 framing 读响应体并转发
-├── build.go       # buildRequest + buildErrorResponse
-├── cache.go       # LRU Cache + cacheKey + ableToCache
-├── upstream.go    # hostport + dialUpstream + forward
+├── main.go            # 入口：监听、accept、goroutine、CONNECT 隧道、请求分发
+├── request.go         # Info 结构体 + parseRequestLine（含 CONNECT 解析）
+├── header.go          # HeaderField + HeaderCollection + parseHeaders + checkName
+├── response.go        # Response + parseResponse + decideFraming
+├── body.go            # copyBody：按 framing 读响应体并转发
+├── build.go           # buildRequest + buildErrorResponse
+├── cache.go           # LRU Cache + cacheKey + ableToCache
+├── upstream.go        # hostport + dialUpstream + forward
+├── timeout_conn.go    # TimeoutConn：实现连接的空闲超时包装
+├── timeout_conn_test.go # TimeoutConn 的心跳保活与超时单元测试
 └── bench/
-    └── main.go    # 压测工具
+    └── main.go        # 压测工具
 ```
-
-## 技术要点
-
-- 流式转发：用 io.Copy 和 io.LimitReader 边读边写，大响应不占内存
-- LRU 实现：container/list 双向链表 + map，O(1) 查找和淘汰
-- singleflight：同 key 并发 miss 时只回源一次，其余等待共享结果
-- CONNECT 隧道：识别 CONNECT 后不再解析 HTTP，双向 io.Copy 透明转发，客户端方向复用 bufio.Reader 避免丢预读字节
-- io.Writer 抽象：copyBody 接收 io.Writer，可缓存时传 io.MultiWriter(conn, &buf)，函数本身不用改
-- 响应捕获：parseResponse 保留原始头字节 rawHeader，与 body 拼接后作为完整响应存入缓存
