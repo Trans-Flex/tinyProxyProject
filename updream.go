@@ -8,7 +8,26 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+var hostPoolMap sync.Map //全局管理所有域名
+
+func getPool(info Info) *ConnPool {
+	hostport := hostport(info)
+
+	if val, ok := hostPoolMap.Load(hostport); ok {
+		return val.(*ConnPool)
+	}
+
+	newPool := NewConnPool(4, 60*time.Second, func() (net.Conn, error) {
+		return dialUpstream(info)
+	})
+
+	actual, _ := hostPoolMap.LoadOrStore(hostport, newPool)
+	return actual.(*ConnPool)
+}
 
 func hostport(info Info) string {
 	var hostport string
@@ -30,11 +49,19 @@ func dialUpstream(info Info) (net.Conn, error) {
 
 func forward(info Info, request string, bodyReader *bufio.Reader, bodyFraming BodyFraming, bodyLength int, writer io.Writer) (Response, error) {
 	//与服务器连接
-	serverConn, err := dialUpstream(info)
+	targetPool := getPool(info)
+	serverConn, err := targetPool.Get()
 	if err != nil {
 		return Response{}, fmt.Errorf("连接 %s 失败: %w", hostport(info), err)
 	}
-	defer serverConn.Close()
+	// defer serverConn.Close() 短链接写法
+
+	needClose := true
+	defer func() {
+		if needClose {
+			targetPool.Discard(serverConn)
+		}
+	}()
 	//向服务器发送请求行和头
 	_, err = io.WriteString(serverConn, request)
 	if err != nil {
@@ -71,5 +98,12 @@ func forward(info Info, request string, bodyReader *bufio.Reader, bodyFraming Bo
 		return Response{}, fmt.Errorf("读取响应体失败: %w", err)
 	}
 
+	connClose := strings.ToLower(resp.header.first("Connection")) == "close"
+	if connClose || resp.bodyFraming == FramingUntilEOF {
+		return resp, nil // defer 里 Discard
+	}
+
+	targetPool.Put(serverConn) // 干净的连接放回池
+	needClose = false
 	return resp, nil
 }

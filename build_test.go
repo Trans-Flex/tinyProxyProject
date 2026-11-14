@@ -71,7 +71,7 @@ func TestBuildRequest(t *testing.T) {
 			"User-Agent: curl/8.0\r\n",
 			"Accept: */*\r\n",
 			"Via: 1.1 proxy\r\n",
-			"Connection: close\r\n",
+			"Connection: keep-alive\r\n",
 		}
 		for _, want := range wantContains {
 			if !strings.Contains(got, want) {
@@ -149,16 +149,16 @@ func TestBuildRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("Connection 头被删除", func(t *testing.T) {
+	t.Run("客户端 Connection 被替换为 keep-alive", func(t *testing.T) {
 		info := mkInfo("GET", "http", "example.com", 80, "/", "", "HTTP/1.1")
-		head := makeHeader("Connection", "keep-alive")
+		head := makeHeader("Connection", "close") // 客户端的连接语义只对客户端这一跳有效
 
 		got, _ := buildRequest(info, head)
-		if strings.Contains(got, "Connection: keep-alive") {
-			t.Errorf("原始 Connection 应被删除\n实际:\n%s", got)
+		if strings.Contains(got, "Connection: close") {
+			t.Errorf("客户端的 Connection 不应被转发到上游\n实际:\n%s", got)
 		}
-		if !strings.Contains(got, "Connection: close\r\n") {
-			t.Errorf("应添加 Connection: close\n实际:\n%s", got)
+		if strings.Count(got, "Connection: keep-alive") != 1 {
+			t.Errorf("应恰好添加一个 Connection: keep-alive\n实际:\n%s", got)
 		}
 	})
 

@@ -60,7 +60,7 @@ func buildRequest(info Info, head HeaderCollection) (string, error) {
 	}
 
 	request.WriteString("Via: 1.1 proxy\r\n")
-	request.WriteString("Connection: close\r\n")
+	request.WriteString("Connection: keep-alive\r\n")
 
 	request.WriteString("\r\n")
 	return request.String(), nil
