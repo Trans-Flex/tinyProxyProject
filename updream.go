@@ -21,7 +21,7 @@ func getPool(info Info) *ConnPool {
 		return val.(*ConnPool)
 	}
 
-	newPool := NewConnPool(4, 60*time.Second, func() (net.Conn, error) {
+	newPool := NewConnPool(25, 60*time.Second, func() (net.Conn, error) {
 		return dialUpstream(info)
 	})
 

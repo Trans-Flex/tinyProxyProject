@@ -1,43 +1,38 @@
 # tinyProxyProject
 
-用 Go 实现的 HTTP/1.1 正向代理，支持并发、LRU 缓存、请求/响应解析、标准错误响应。
+用 Go 实现的 HTTP/1.1 正向代理，支持双端长连接、TCP 连接池、LRU 缓存、Chunked 流式解析、请求/响应解析及并发控制。
 
 ## 功能
 
-- HTTP/1.1 GET 与 POST 请求转发
-- HTTPS CONNECT 隧道，盲转发 TLS 密文，不解密
-- CONNECT 隧道空闲超时（基于双向心跳机制，防止恶意挂机耗尽系统 fd）
-- 每连接一 goroutine 的并发模型
-- 请求行解析：method、scheme、host、port、path、query、version
-- IPv6 地址支持（`[::1]:8080`）
-- 响应解析：状态行、头字段、body framing（Content-Length / chunked / until EOF）
-- LRU 缓存：完整 URL 做 key，`container/list` + map，`sync.Mutex` 保护
-- 可缓存判断：仅缓存 200、Content-Length、无 Set-Cookie、Cache-Control 允许的响应
-- singleflight 合并同 key 回源，解决缓存击穿
-- 标准错误响应：400 / 500 / 501 / 502
-- hop-by-hop 头处理：删除 Proxy-Connection，重写 Host，添加 Via 和 Connection: close
-- 完备的测试体系：80+ 单元测试用例，全量通过 `go test -race` 校验
+- **HTTP/1.1 双端 Keep-Alive**：支持客户端与代理、代理与上游服务器之间的长连接复用。
+- **动态 TCP 连接池 (`ConnPool`)**：基于 `sync.Mutex` 和带缓冲 `chan` 自研连接池。支持依赖注入 (`DialFunc`)、1ms 极速假死探测、以及基于时间戳的惰性清理 (Lazy Cleanup)。
+- **多目标池管理**：使用 `sync.Map` 为不同 Host 维护专属连接池，防止目标服务器连接串包。
+- **Chunked 流式状态机**：纯手写 `FramingChunked` 解析状态机，精准解析十六进制块长度与尾部 Trailer，确保长连接复用下零脏数据残留。
+- **HTTPS CONNECT 隧道**：盲转发 TLS 密文，支持双向心跳机制防止恶意挂机。
+- **LRU 缓存与防击穿**：基于完整 URL 的 LRU 缓存，引入 `singleflight` 合并同 Key 回源，解决缓存击穿。
+- **协议校验**：完备的请求行/头字段/状态行校验，支持 IPv6，以及 hop-by-hop 头处理。
+- **测试覆盖**：80+ 单元测试用例，覆盖 Chunked 边界、异常 RequestLine、缓存淘汰等，全量通过 `go test -race` 校验。
 
 ## 架构
 ```text
-Client ──HTTP────▶ Proxy ──HTTP────▶ Server
+Client ──HTTP(Keep-Alive)────▶ Proxy ──HTTP(Keep-Alive)────▶ Server
                     │
                     │ LRU Cache + singleflight
+                    │ sync.Map[Host] -> ConnPool
                     │
-Client ──CONNECT──▶ Proxy ──TCP─────▶ Server
+Client ──CONNECT────────────▶ Proxy ──TCP──────────────────▶ Server
                     │
                     │ 双向 io.Copy(盲转发 TLS 密文)
 ```
 HTTP请求流程:
 
-1. 解析客户端请求行和头
-2. 构建转发请求（absolute-form → origin-form，重写 Host，删 hop-by-hop）
-3. 查 LRU 缓存，命中直接返回
-4. 未命中则走 singleflight 合并同 key 回源
-5. 连目标服务器，转发请求
-6. 解析响应头，判断 body framing
-7. 边转发 body 边收集（可缓存时）
-8. 转发成功后写入缓存
+1. 客户端循环 (for) 监听并解析 Request 和 Header，判断 clientClose。
+2. 构建转发请求，查 LRU 缓存，命中则直接返回。
+3. 未命中走 singleflight 合并回源。从 sync.Map 获取目标 Host 的连接池。
+4. ConnPool.Get() 获取连接（包含假死检测与惰性超时清理）。
+5. 连目标服务器，转发请求，读取 Response 头并判断 body framing。
+6. 边转发 body 边收集（对于 Content-Length 或 Chunked 采用流式透传）。
+7. 完美转发结束后，若无报错且支持复用，则 ConnPool.Put() 回收连接。
 
 CONNECT隧道流程:
 
@@ -81,23 +76,43 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 
 50 并发冷启动下，singleflight 将上游回源次数从 50 降到 1，QPS 提升 4.24 倍，P99 从 12.32s 降到 2.90s。代价是中位数延迟从 862ms 变为 2.90s，因为所有等待者共享同一次回源的延迟。这是“保护上游、降低尾部延迟”和“中位数延迟”之间的取舍。
 
+## 引入长连接
+| 场景 | 总耗时 | QPS | P50 延迟 | P99 延迟 |
+|---|---|---|---|---|
+| 短连接 | 6.28s | 79.56 | 536ms | 1.18s |
+| Keep-Alive (ConnPool) | 6.40s | 78.06 | 333ms | 2.16s |
+
+**数据洞察**：在公网无缓存场景下，长连接耗时与短连接相近，甚至 P99 偏高。原因有二：
+1. **目标服务器限制**：`httpbin.org` (基于 Cloudflare) 频繁返回 `Connection: close`，代理触发防御机制被迫销毁连接，实际上退化为短连接。
+2. **网络拥塞排队**：公网跨国 RTT 波动大，长连接池中某个请求遭遇网络抖动（如排队）时，会阻塞复用该连接的后续请求，导致长尾延迟（P99）升高。而短连接因独立建连，反而规避了排队效应。
+
+## 缓存命中场景
+| 场景 | 总耗时 | QPS | P50 延迟 | P99 延迟 |
+|---|---|---|---|---|
+| 短连接 + LRU缓存 | 0.91s | 544.43 | 3.9ms | 706ms |
+| **Keep-Alive + LRU缓存** | **0.67s** | **738.50** | **888μs** | **665ms** |
+
+**数据洞察**：在启用 LRU 缓存后，Keep-Alive 模式的 QPS 提升至 **738**，P99 降低至 **665ms**。这证明了在命中内存缓存的高并发场景下，连接池带来的零握手开销与快速响应能力全面碾压短连接。
+
 ## 技术要点
 
-- 流式转发：用 ```io.Copy``` 和 ```io.LimitReader```，可缓存时传 ```io.MultiWriter(conn, &buf)```，函数本身不用改。
-- 响应捕获：```parseResponse``` 保留原始头字节 ```rawHeader```，与 body 拼接后作为完整响应存入缓存。
-- 接口抽象：```copyBody``` 接收 ```io.Writer```（```ialUpstream + forward```），边读边写，大响应不占内存。
-- LRU 实现：```container/list``` 双向链表 + map，O(1) 查找和淘汰。
-- CONNECT 隧道：识别 CONNECT 后不再解析 HTTP，双向 ```io.Copy``` 透明转发；客户端方向复用 ```bufio.Reader``` 避免丢预读字节。
-- 心跳超时 (TimeoutConn)：通过组合（Embedding）原生 ```net.Conn```，在自定义的 ```Read/Write``` 方法中实时刷新 Deadline，实现优雅的空闲熔断。
+- 流式转发：用 `io.Copy` 和 `io.LimitReader`，可缓存时传 `io.MultiWriter(conn, &buf)`，函数本身不用改。
+- 响应捕获：`parseResponse` 保留原始头字节 `rawHeader`，与 body 拼接后作为完整响应存入缓存。
+- 接口抽象：`copyBody` 接收 `io.Writer`（`ialUpstream + forward`），边读边写，大响应不占内存。
+- LRU 实现：`container/list` 双向链表 + `map`，O(1) 查找和淘汰。
+- CONNECT 隧道：识别 CONNECT 后不再解析 HTTP，双向 `io.Copy` 透明转发；客户端方向复用 `bufio.Reader` 避免丢预读字节。
+- 心跳超时 (TimeoutConn)：通过组合（Embedding）原生 `net.Conn`，在自定义的 `Read/Write` 方法中实时刷新 Deadline，实现优雅的空闲熔断。
+- 连接池假死探测：从 `Pool` 中取出的连接，通过 `SetReadDeadline(1ms)` 试探，若报 `timeout` 则连接健康，否则判定为被服务端静默断开的僵尸连接并剔除。
+- 连接池惰性清理：出池时校验 `lastUsed` 时间戳，若超时直接销毁，避免后台定时器锁竞争。
+- Chunked 状态机：`io.CopyN` 精准按长度转发，先写 `\r\n` 换行，读到 0 后继续循环读取 Trailer 直到空行，完美保障 TCP 缓冲区无数据残留。
 
 ## 已知限制
-- 只缓存 Content-Length 响应，chunked 和 until-EOF 不缓存
-- 不支持 keep-alive，每个请求使用 Connection: close
+- 仅缓存带有 Content-Length 的响应（Chunked 流式响应为保证低内存占用，不进行内存缓存）。
 - 未对 method 做合法性校验，依赖服务器拒绝
 
 ## 未来计划
-- chunked 响应缓存
-- keep-alive 连接复用
+- 引入分片或 LRU 机制限制 hostPoolMap 的最大池子数量，防止恶意伪造 Host 导致内存爆炸。
+- 增加 Prometheus 监控指标（连接池活跃数、命中率、QPS）。
 
 ## 项目结构
 ```text
@@ -109,6 +124,7 @@ curl.exe -x http://127.0.0.1:8080 https://example.com/
 ├── body.go            # copyBody：按 framing 读响应体并转发
 ├── build.go           # buildRequest + buildErrorResponse
 ├── cache.go           # LRU Cache + cacheKey + ableToCache
+├── connpool.go        # 自研 TCP 连接池（假死检测、懒清理）
 ├── upstream.go        # hostport + dialUpstream + forward
 ├── timeout_conn.go    # TimeoutConn：实现连接的空闲超时包装
 ├── timeout_conn_test.go # TimeoutConn 的心跳保活与超时单元测试
